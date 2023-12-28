@@ -89,7 +89,8 @@ def extract_education_from_resume(text):
     education = []
 
     # Use regex pattern to find education information
-    pattern = r"(?i)(?:Bsc|\bB\.\w+|\bM\.\w+|\bPh\.D\.\w+|\bBachelor(?:'s)?|\bMaster(?:'s)?|\bPh\.D)\s(?:\w+\s)*\w+"
+    pattern = (r"(?i)(?:Bsc|\bB\.\w+|\bM\.\w+|\bPh\.D\.\w+|\bBachelor(?:'s)?|\bMaster("
+               r"?:'s)?|\bPh\.D|B\.E|MTech|MCA|BCA)\s(?:\w+\s)*\w+")
     matches = re.findall(pattern, text)
     for match in matches:
         education.append(match.strip())
@@ -97,15 +98,66 @@ def extract_education_from_resume(text):
     return education
 
 
-if __name__ == '__main__':
-    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\ARUP_ACHARYA_Resume.pdf'
-    file_path = 'C:\\Users\\Arup Acharya\\Downloads\\ARUP_ACHARYA_Resume.docx'
-    if file_path.lower().endswith('.pdf'):
-        resume_text = extract_text_from_pdf(file_path)
-    elif file_path.lower().endswith('.docx'):
-        resume_text = extract_text_from_docx(file_path)
+def extract_experience_from_resume(resume_text):
+    nlp = spacy.load("en_core_web_sm")
+    matcher = Matcher(nlp.vocab)
+
+    experience_pattern = [
+        {"IS_SPACE": True, "OP": "?"},  # Optional space
+        {"IS_DIGIT": True, "OP": "+"},  # Match one or more digits
+        {"IS_SPACE": True, "OP": "?"},  # Optional space
+        {"ORTH": {"in": ["+", ""]}},  # Match the plus sign or an empty string
+        {"IS_SPACE": True, "OP": "?"},  # Optional space
+        {"LOWER": {"in": ["year", "years", "Years"]}},  # Match "year" or "years"
+    ]
+
+    matcher.add("Experience", [experience_pattern])
+
+    doc = nlp(resume_text)
+
+    matches = matcher(doc)
+
+    for match_id, start, end in matches:
+        span = doc[start:end]
+        return span.text
+
+    return None
+
+
+def extract_experience_from_resume_retry(resume_text):
+    pattern = r'(\d+)\s+years\s+of\s+experience'
+    match = re.search(pattern, resume_text)
+
+    if match:
+        years_of_experience = match.group(1)
+        return years_of_experience
     else:
-        print("Unsupported file format")
+        return None
+
+
+def extracted_education_from_resume_retry(resume_text):
+    # Split the text into lines
+    lines = resume_text.split('\n')
+
+    # Search for the line containing "BE (Computer Science)"
+    for line in lines:
+        if " BE (Computer Science)" in line:
+            academic_details = line.strip()
+            break
+    else:
+        return None
+
+    return academic_details
+
+if __name__ == '__main__':
+    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Bhupendra Kumar Patwa Resume.pdf'
+    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Sushma Iralapalle_Automation Architect (1).pdf'
+    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Resume of Ilangathir Joseph.pdf'
+    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Rupa Bhagwat_Resume1.pdf'
+    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Sushant_CV_Automation_SDET_7Yrs.pdf'
+    file_path = 'C:\\Users\\Arup Acharya\\Downloads\\ARUP_ACHARYA_Resume.pdf'
+
+    resume_text = extract_text_from_pdf(file_path)
 
     print(resume_text)
 
@@ -128,10 +180,26 @@ if __name__ == '__main__':
     else:
         print("Email not found")
 
-    skills_list = ['Python', 'Data Analysis', 'Machine Learning', 'Communication', 'Java', 'UI Testing' 'Selenium',
-                   'TOSCA', 'BDD  Testing', 'RPA']
+    skills_list = ['Python', 'Data Analysis', 'Machine Learning', 'Communication', 'UI Testing' 'Selenium',
+                   'TOSCA', 'BDD  Testing', 'RPA', 'Data Visualization', 'Predictive Analysis', 'Statistical Modeling',
+                   'Data Mining', 'Clustering & Classification', 'Data Analytics', 'Quantitative Analysis',
+                   'Web Scraping', 'ML Algorithms', 'Keras', 'Pytorch', 'Probability', 'Scikit-learn', 'Tensorflow',
+                   "Flask", 'Streamlit', 'React', 'Django', 'Node JS', 'React JS', 'php', 'laravel', 'Magento',
+                   'wordpress', 'Javascript', 'Angular JS', 'c#', 'Flask', 'SDK', 'Android', 'Android development',
+                   'Flutter', 'Kotlin', 'XML', 'Java', 'Kivy', 'GIT', 'IOS', 'IOS Development',
+                   'Swift', 'Cocoa', 'Cocoa Touch', 'Xcode', 'Objective-C', 'SQLite', 'Plist', 'StoreKit', "UI-Kit",
+                   'AV Foundation', 'Auto-Layout', 'Adobe XD', 'Prototyping', 'Storyframes', 'Adobe Photoshop', 'Solid',
+                   'ux', 'adobe xd', 'figma', 'zeplin', 'balsamiq', 'ui', 'prototyping', 'wireframes',
+                   'adobe photoshop', 'photoshop', 'editing', 'adobe illustrator', 'illustrator', 'adobe after effects',
+                   'after effects', 'adobe premier pro', 'adobe indesign', 'indesign', 'wireframe', 'solid', 'grasp',
+                   'user research', 'user experience', 'Selenium WebDriver(Java)', 'QTP', 'HP ALM', 'Python',
+                   'Appium', 'docker', 'Postman', 'Jira', 'SOAPUI', 'Rational ClearQuest', 'GITHUB', 'BitBucket',
+                   'TestNG', 'Unix ', 'Solaris', 'SQL', 'Agile Scrum', 'Waterfall', 'V-model', 'Functional',
+                   'System', ' Integration', ' Regression', ' Black Box', ' GUI testing', ' compatibility', ' API',
+                   'security', 'performance testing']
+
     extracted_skills = extract_skills_from_resume(resume_text, skills_list)
-    # extracted_skills = extract_skills_from_resume1(resume_text)
+
     if extracted_skills:
         print("Skills:", extracted_skills)
     else:
@@ -141,4 +209,19 @@ if __name__ == '__main__':
     if extracted_education:
         print("Education:", extracted_education)
     else:
-        print("No education information found")
+        extracted_education = extracted_education_from_resume_retry(resume_text)
+        if extracted_education:
+            print("Experience:", extracted_education)
+        else:
+            print("No education information found")
+
+    experience_entities = extract_experience_from_resume(resume_text)
+
+    if experience_entities:
+        print("Experience:", experience_entities)
+    else:
+        experience_entities = extract_experience_from_resume_retry(resume_text)
+        if experience_entities:
+            print("Experience:", experience_entities)
+        else:
+            print("No experience information found")
