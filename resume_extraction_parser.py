@@ -152,10 +152,10 @@ def extracted_education_from_resume_retry(resume_text):
 if __name__ == '__main__':
     # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Bhupendra Kumar Patwa Resume.pdf'
     # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Sushma Iralapalle_Automation Architect (1).pdf'
-    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Resume of Ilangathir Joseph.pdf'
+    file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Resume of Ilangathir Joseph.pdf'
     # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Rupa Bhagwat_Resume1.pdf'
     # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Sushant_CV_Automation_SDET_7Yrs.pdf'
-    file_path = 'C:\\Users\\Arup Acharya\\Downloads\\ARUP_ACHARYA_Resume.pdf'
+    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\ARUP_ACHARYA_Resume.pdf'
 
     resume_text = extract_text_from_pdf(file_path)
 
@@ -211,14 +211,14 @@ if __name__ == '__main__':
     else:
         extracted_education = extracted_education_from_resume_retry(resume_text)
         if extracted_education:
-            print("Experience:", extracted_education)
+            print("Education:", extracted_education)
         else:
             print("No education information found")
 
     experience_entities = extract_experience_from_resume(resume_text)
 
     if experience_entities:
-        print("Experience:", experience_entities)
+        print("Experience:", experience_entities.strip())
     else:
         experience_entities = extract_experience_from_resume_retry(resume_text)
         if experience_entities:
