@@ -1,227 +1,175 @@
-import re
-import spacy
-from docx import Document
-from pdfminer.high_level import extract_text
-from spacy.matcher import Matcher
+import json
+import boto3
+import fitz
+from decimal import Decimal
+from boto3.dynamodb.types import TypeDeserializer
+from datetime import datetime
+import botocore
+import os
+
+# Initialize the AWS service clients
+dynamodb = boto3.resource('dynamodb')
+s3_client = boto3.client('s3')
+bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
 
 
-def extract_text_from_pdf(pdf_path):
-    return extract_text(pdf_path)
+def query_dynamodb_item_with_sk_prefix(table_name, partition_key_value, sort_key_prefix):
+    table = dynamodb.Table(table_name)
+    response = table.query(
+        KeyConditionExpression=boto3.dynamodb.conditions.Key('PK').eq(partition_key_value) &
+                               boto3.dynamodb.conditions.Key('SK').begins_with(sort_key_prefix)
+    )
+    items = response.get('Items')
+    if items:
+        return items[0]
+    return None
 
 
-def extract_text_from_docx(docx_path):
+def extract_text_from_pdf(pdf_data):
     text = ""
-    doc = Document(docx_path)
-    for paragraph in doc.paragraphs:
-        text += paragraph.text + "\n"
+    pdf_document = fitz.open(stream=pdf_data, filetype="pdf")
+    for page in pdf_document:
+        text += page.get_text()
     return text
 
 
-def extract_name(resume_text):
-    nlp = spacy.load('en_core_web_sm')
-    matcher = Matcher(nlp.vocab)
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            if obj % 1 == 0:
+                return int(obj)
+            else:
+                return float(obj)
 
-    # Define name patterns
-    patterns = [
-        [{'POS': 'PROPN'}, {'POS': 'PROPN'}],  # First name and Last name
-        [{'POS': 'PROPN'}, {'POS': 'PROPN'}, {'POS': 'PROPN'}],  # First name, Middle name, and Last name
-        [{'POS': 'PROPN'}, {'POS': 'PROPN'}, {'POS': 'PROPN'}, {'POS': 'PROPN'}]
-        # First name, Middle name, Middle name, and Last name
-        # Add more patterns as needed
-    ]
-
-    for pattern in patterns:
-        matcher.add('NAME', patterns=[pattern])
-
-    doc = nlp(resume_text)
-    matches = matcher(doc)
-
-    for match_id, start, end in matches:
-        span = doc[start:end]
-        return span.text
-
-    return None
+        return super(DecimalEncoder, self).default(obj)
 
 
-def extract_contact_number_from_resume(text):
-    contact_number = None
+def lambda_handler(event, context):
+    print(event)
+    # Define the table name and keys
+    table_name = os.environ['DYNAMO_TABLE_NAME']
+    partition_key_value = event.get('USER_PK')
+    sort_key_prefix = event.get('USER_DETAIL_SK')
 
-    # Use regex pattern to find a potential contact number
-    pattern = r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"
-    match = re.search(pattern, text)
-    if match:
-        contact_number = match.group()
+    # Query DynamoDB for items where SK begins with "ID#"
+    item = query_dynamodb_item_with_sk_prefix(table_name, partition_key_value, sort_key_prefix)
 
-    return contact_number
+    if item:
 
+        resumeId = item.get('SK').split('#')[-1]
+        cvId = item.get('CV')
 
-def extract_email_from_resume(text):
-    email = None
+        # Prepare the response body
+        body_content = json.dumps(item, cls=DecimalEncoder)
 
-    # Use regex pattern to find a potential email address
-    pattern = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
-    match = re.search(pattern, text)
-    if match:
-        email = match.group()
+        s3_bucket_name = os.environ['S3_BUCKET_NAME']
 
-    return email
+        key = "users/" + resumeId + "/resumes/" + cvId
 
+        try:
+            # Attempt to fetch the PDF file from S3
+            response = s3_client.get_object(Bucket=s3_bucket_name, Key=key)
+            pdf_data = response['Body'].read()
 
-def extract_skills_from_resume(text, skills_list):
-    skills = []
+        except botocore.exceptions.ClientError as error:
+            # Check the specific error code
+            error_code = error.response['Error']['Code']
+            if error_code == 'AccessDenied':
+                print("Access denied to the S3 object.")
+                return {
+                    'statusCode': 403,
+                    'body': json.dumps({'message': 'Access denied to the specified S3 object'})
+                }
+            elif error_code == 'NoSuchKey':
+                print("The specified key does not exist.")
+                return {
+                    'statusCode': 404,
+                    'body': json.dumps({'message': 'The specified key does not exist'})
+                }
+            else:
+                # Handle other possible exceptions
+                print(f"Unexpected error: {error_code}")
+                return {
+                    'statusCode': 500,
+                    'body': json.dumps({'message': 'Internal server error'})
+                }
 
-    for skill in skills_list:
-        pattern = r"\b{}\b".format(re.escape(skill))
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            skills.append(skill)
+        # Extract text from the PDF
+        processed_text = extract_text_from_pdf(pdf_data)
 
-    return skills
+        prompt = (
+            'Human:\n'
+            f'Find below details from:\n\n{json.dumps(processed_text, indent=2)}\n\n'
+            'Name:\nEmail:\nExperience in year:\nAchievements:\nTechnical skills:'
+            '\nSoft skills:\nCore skills:\nEducation:\nIndustry experience:\nResponsibilities:'
+            '\nAchievements against responsibility:\nCertifications:\nStrength:\n'
+            'Experience type (leadership, Mid management, Senior management, Team lead, Individual contributor):'
+            '\nTeam handling experience:\nIndustry type(B2B, D2C, C2C, B2C):\n\nAssistant:\" turn'
+        )
 
+        # The payload to be provided to Bedrock
+        body = json.dumps(
+            {
+                "prompt": prompt,
+                "max_tokens_to_sample": 1000,
+                "temperature": 0.5,
+                "top_k": 250,
+                "top_p": 1,
+                "stop_sequences": ["\n\nAssistant:\" turn"],
+                "anthropic_version": "bedrock-2023-05-31"
+            }
+        )
 
-def extract_skills_from_resume1(text):
-    pattern = r'\b([A-Za-z0-9]+)\b'
-    skills = re.findall(pattern, text)
-    return skills
+        # The actual call to retrieve an answer from the model
+        response = bedrock_runtime.invoke_model(
+            body=body,
+            modelId='anthropic.claude-v2:1',
+            accept='*/*',
+            contentType='application/json'
+        )
 
+        response_body = json.loads(response['body'].read())
 
-def extract_education_from_resume(text):
-    education = []
+        completion_text = response_body.get('completion', '').strip()
 
-    # Use regex pattern to find education information
-    pattern = (r"(?i)(?:Bsc|\bB\.\w+|\bM\.\w+|\bPh\.D\.\w+|\bBachelor(?:'s)?|\bMaster("
-               r"?:'s)?|\bPh\.D|B\.E|MTech|MCA|BCA)\s(?:\w+\s)*\w+")
-    matches = re.findall(pattern, text)
-    for match in matches:
-        education.append(match.strip())
+        # Including the next line character to start directly from the next line
+        first_colon_pos = completion_text.find(':')
+        if first_colon_pos != -1:
+            # add 1 to start slicing after the colon and use strip to remove any leading/trailing whitespace or newline characters
+            completion_text = completion_text[first_colon_pos + 1:].strip()
 
-    return education
+        # Update the DynamoDB item with the processed text
+        update_response = update_cv_extract_in_dynamodb(table_name, partition_key_value, item['SK'], completion_text)
 
+        return {
+            'statusCode': 200,
+            'body': json.dumps({'message': 'CV extract updated successfully'})
+        }
 
-def extract_experience_from_resume(resume_text):
-    nlp = spacy.load("en_core_web_sm")
-    matcher = Matcher(nlp.vocab)
-
-    experience_pattern = [
-        {"IS_SPACE": True, "OP": "?"},  # Optional space
-        {"IS_DIGIT": True, "OP": "+"},  # Match one or more digits
-        {"IS_SPACE": True, "OP": "?"},  # Optional space
-        {"ORTH": {"in": ["+", ""]}},  # Match the plus sign or an empty string
-        {"IS_SPACE": True, "OP": "?"},  # Optional space
-        {"LOWER": {"in": ["year", "years", "Years"]}},  # Match "year" or "years"
-    ]
-
-    matcher.add("Experience", [experience_pattern])
-
-    doc = nlp(resume_text)
-
-    matches = matcher(doc)
-
-    for match_id, start, end in matches:
-        span = doc[start:end]
-        return span.text
-
-    return None
-
-
-def extract_experience_from_resume_retry(resume_text):
-    pattern = r'(\d+)\s+years\s+of\s+experience'
-    match = re.search(pattern, resume_text)
-
-    if match:
-        years_of_experience = match.group(1)
-        return years_of_experience
     else:
-        return None
+        return {
+            'statusCode': 404,
+            'body': 'Item not found'
+        }
 
 
-def extracted_education_from_resume_retry(resume_text):
-    # Split the text into lines
-    lines = resume_text.split('\n')
+def update_cv_extract_in_dynamodb(table_name, partition_key, sort_key, cv_extract):
+    table = dynamodb.Table(table_name)
 
-    # Search for the line containing "BE (Computer Science)"
-    for line in lines:
-        if " BE (Computer Science)" in line:
-            academic_details = line.strip()
-            break
-    else:
-        return None
+    # Get current date and time
+    current_datetime = datetime.now().isoformat()
 
-    return academic_details
+    response = table.update_item(
+        Key={
+            'PK': partition_key,
+            'SK': sort_key
+        },
+        UpdateExpression="SET cvExtract = :cvExtract, cvExtractDate = :cvExtractDate",
 
-if __name__ == '__main__':
-    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Bhupendra Kumar Patwa Resume.pdf'
-    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Sushma Iralapalle_Automation Architect (1).pdf'
-    file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Resume of Ilangathir Joseph.pdf'
-    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Rupa Bhagwat_Resume1.pdf'
-    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\Sushant_CV_Automation_SDET_7Yrs.pdf'
-    # file_path = 'C:\\Users\\Arup Acharya\\Downloads\\ARUP_ACHARYA_Resume.pdf'
-
-    resume_text = extract_text_from_pdf(file_path)
-
-    print(resume_text)
-
-    name = extract_name(resume_text)
-
-    if name:
-        print("Name:", name)
-    else:
-        print("Name not found")
-
-    contact_number = extract_contact_number_from_resume(resume_text)
-    if contact_number:
-        print("Contact Number:", contact_number)
-    else:
-        print("Contact Number not found")
-
-    email = extract_email_from_resume(resume_text)
-    if email:
-        print("Email:", email)
-    else:
-        print("Email not found")
-
-    skills_list = ['Python', 'Data Analysis', 'Machine Learning', 'Communication', 'UI Testing' 'Selenium',
-                   'TOSCA', 'BDD  Testing', 'RPA', 'Data Visualization', 'Predictive Analysis', 'Statistical Modeling',
-                   'Data Mining', 'Clustering & Classification', 'Data Analytics', 'Quantitative Analysis',
-                   'Web Scraping', 'ML Algorithms', 'Keras', 'Pytorch', 'Probability', 'Scikit-learn', 'Tensorflow',
-                   "Flask", 'Streamlit', 'React', 'Django', 'Node JS', 'React JS', 'php', 'laravel', 'Magento',
-                   'wordpress', 'Javascript', 'Angular JS', 'c#', 'Flask', 'SDK', 'Android', 'Android development',
-                   'Flutter', 'Kotlin', 'XML', 'Java', 'Kivy', 'GIT', 'IOS', 'IOS Development',
-                   'Swift', 'Cocoa', 'Cocoa Touch', 'Xcode', 'Objective-C', 'SQLite', 'Plist', 'StoreKit', "UI-Kit",
-                   'AV Foundation', 'Auto-Layout', 'Adobe XD', 'Prototyping', 'Storyframes', 'Adobe Photoshop', 'Solid',
-                   'ux', 'adobe xd', 'figma', 'zeplin', 'balsamiq', 'ui', 'prototyping', 'wireframes',
-                   'adobe photoshop', 'photoshop', 'editing', 'adobe illustrator', 'illustrator', 'adobe after effects',
-                   'after effects', 'adobe premier pro', 'adobe indesign', 'indesign', 'wireframe', 'solid', 'grasp',
-                   'user research', 'user experience', 'Selenium WebDriver(Java)', 'QTP', 'HP ALM', 'Python',
-                   'Appium', 'docker', 'Postman', 'Jira', 'SOAPUI', 'Rational ClearQuest', 'GITHUB', 'BitBucket',
-                   'TestNG', 'Unix ', 'Solaris', 'SQL', 'Agile Scrum', 'Waterfall', 'V-model', 'Functional',
-                   'System', ' Integration', ' Regression', ' Black Box', ' GUI testing', ' compatibility', ' API',
-                   'security', 'performance testing']
-
-    extracted_skills = extract_skills_from_resume(resume_text, skills_list)
-
-    if extracted_skills:
-        print("Skills:", extracted_skills)
-    else:
-        print("No skills found")
-
-    extracted_education = extract_education_from_resume(resume_text)
-    if extracted_education:
-        print("Education:", extracted_education)
-    else:
-        extracted_education = extracted_education_from_resume_retry(resume_text)
-        if extracted_education:
-            print("Education:", extracted_education)
-        else:
-            print("No education information found")
-
-    experience_entities = extract_experience_from_resume(resume_text)
-
-    if experience_entities:
-        print("Experience:", experience_entities.strip())
-    else:
-        experience_entities = extract_experience_from_resume_retry(resume_text)
-        if experience_entities:
-            print("Experience:", experience_entities)
-        else:
-            print("No experience information found")
+        ExpressionAttributeValues={
+            ':cvExtract': cv_extract,
+            ':cvExtractDate': current_datetime
+        },
+        ReturnValues="UPDATED_NEW"
+    )
+    return response
